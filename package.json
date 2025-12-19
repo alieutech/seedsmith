@@ -1,6 +1,6 @@
 {
   "name": "@alieutech/seedsmith",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "CLI + library to auto-generate MongoDB seed data from Mongoose schemas",
   "license": "MIT",
   "main": "dist/index.js",

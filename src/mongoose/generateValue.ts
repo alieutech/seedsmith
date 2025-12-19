@@ -98,10 +98,11 @@ export async function generateValue(
       case "Date":
         return faker.date.recent();
       case "ObjectID":
+      case "ObjectId":
         return ref ? resolveRef(ref) : new mongoose.Types.ObjectId();
       case "Array":
-        // For arrays, generation handled outside using isArray branch
-        return [faker.lorem.word()];
+        // Handled by isArray branch below; default to a primitive element
+        return faker.lorem.word();
       case "Decimal128":
         return mongoose.Types.Decimal128.fromString(
           String(faker.number.float({ min: 0, max: 1000, multipleOf: 0.01 }))

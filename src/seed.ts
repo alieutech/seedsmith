@@ -197,6 +197,8 @@ export async function seedDatabase(
       for (let i = 0; i < countForModel; i++) {
         const doc: Record<string, any> = {};
         for (const field of descriptor.fields) {
+          // Skip _id so Mongo/Mongoose can generate a proper ObjectId
+          if (field.path === "_id") continue;
           try {
             const val = await generateValue(field, refResolver);
             setDeep(doc, field.path, val);
@@ -213,16 +215,19 @@ export async function seedDatabase(
 
       // Insert with small retry for uniqueness errors
       let inserted = 0;
-      const ordered = false; // continue on error
       try {
-        const res = await model.insertMany(docs, {
-          ordered,
+        const createdAll = await model.create(docs, {
           session: session ?? undefined,
         });
-        inserted += res.length;
+        const createdCount = Array.isArray(createdAll)
+          ? createdAll.length
+          : createdAll
+          ? 1
+          : 0;
+        inserted += createdCount;
       } catch (e: any) {
         logger.warn(
-          `Bulk insert failed for '${name}'. Falling back to individual inserts. ${
+          `Batch create failed for '${name}'. Falling back to individual inserts. ${
             e?.message || e
           }`
         );
@@ -231,10 +236,10 @@ export async function seedDatabase(
           let attempts = 0;
           while (attempts < 3) {
             try {
-              const created = await model.create([d], {
+              const created = await model.create(d, {
                 session: session ?? undefined,
               });
-              inserted += created.length;
+              inserted += created ? 1 : 0;
               break;
             } catch (err: any) {
               attempts++;
