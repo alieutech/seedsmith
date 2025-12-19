@@ -153,6 +153,9 @@ async function seedDatabase(mongoose, options) {
             for (let i = 0; i < countForModel; i++) {
                 const doc = {};
                 for (const field of descriptor.fields) {
+                    // Skip _id so Mongo/Mongoose can generate a proper ObjectId
+                    if (field.path === "_id")
+                        continue;
                     try {
                         const val = await (0, generateValue_1.generateValue)(field, refResolver);
                         setDeep(doc, field.path, val);
@@ -165,25 +168,28 @@ async function seedDatabase(mongoose, options) {
             }
             // Insert with small retry for uniqueness errors
             let inserted = 0;
-            const ordered = false; // continue on error
             try {
-                const res = await model.insertMany(docs, {
-                    ordered,
+                const createdAll = await model.create(docs, {
                     session: session !== null && session !== void 0 ? session : undefined,
                 });
-                inserted += res.length;
+                const createdCount = Array.isArray(createdAll)
+                    ? createdAll.length
+                    : createdAll
+                        ? 1
+                        : 0;
+                inserted += createdCount;
             }
             catch (e) {
-                logger.warn(`Bulk insert failed for '${name}'. Falling back to individual inserts. ${(e === null || e === void 0 ? void 0 : e.message) || e}`);
+                logger.warn(`Batch create failed for '${name}'. Falling back to individual inserts. ${(e === null || e === void 0 ? void 0 : e.message) || e}`);
                 // retry individually
                 for (const d of docs) {
                     let attempts = 0;
                     while (attempts < 3) {
                         try {
-                            const created = await model.create([d], {
+                            const created = await model.create(d, {
                                 session: session !== null && session !== void 0 ? session : undefined,
                             });
-                            inserted += created.length;
+                            inserted += created ? 1 : 0;
                             break;
                         }
                         catch (err) {
