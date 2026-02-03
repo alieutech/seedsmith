@@ -47,7 +47,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@faker-js/faker": "^8.4.1",
+    "@faker-js/faker": "^10.2.0",
     "mongoose": "^8.5.2"
   },
   "devDependencies": {
