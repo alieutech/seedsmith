@@ -78,6 +78,17 @@ await seedDatabase(mongoose, {
 await mongoose.disconnect();
 ```
 
+Note: SeedSmith inspects models that are registered with the Mongoose instance you pass in. If your models live in files (for example `./models/user.js`), require/import them before calling `seedDatabase`, or pass `modelsPath` to automatically load them. Example:
+
+```ts
+// require the model files so they register with mongoose
+require("./models/user");
+require("./models/post");
+
+// then call seedDatabase
+await seedDatabase(mongoose, { docsPerModel: 10 });
+```
+
 ## Notes
 
 - SeedSmith throws if `NODE_ENV` is `production`.
