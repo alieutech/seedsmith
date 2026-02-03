@@ -8,6 +8,8 @@ import { extractSchema, type ModelDescriptor } from "./mongoose/extractSchema";
 import { generateValue } from "./mongoose/generateValue";
 import { makeRefResolver } from "./mongoose/relationResolver";
 import { createLogger, type Logger } from "./utils/logger";
+import type { SeedAdapter, SeedSession } from "./adapters/types";
+import { createMongooseAdapter } from "./adapters/mongooseAdapter";
 
 export interface SeedOptions {
   modelsPath?: string; // Directory containing model files that register with mongoose
@@ -19,6 +21,8 @@ export interface SeedOptions {
   seed?: number; // deterministic seeding
   verbose?: boolean;
   logger?: Logger;
+  /** Optional adapter for ORM abstraction; defaults to Mongoose adapter */
+  adapter?: SeedAdapter;
 }
 
 export interface SeedSummary {
@@ -44,7 +48,7 @@ function loadModelsFromDir(modelsPath: string) {
     files = fs.readdirSync(abs);
   } catch (e: any) {
     throw new Error(
-      `SeedSmith: Failed to read models directory: ${abs}. ${e?.message || e}`
+      `SeedSmith: Failed to read models directory: ${abs}. ${e?.message || e}`,
     );
   }
   const loadableExt = new Set([".js", ".cjs", ".mjs"]);
@@ -57,14 +61,14 @@ function loadModelsFromDir(modelsPath: string) {
         require(full);
       } catch (e: any) {
         throw new Error(
-          `SeedSmith: Failed to load model file ${full}. ${e?.message || e}`
+          `SeedSmith: Failed to load model file ${full}. ${e?.message || e}`,
         );
       }
     });
 }
 
 async function fetchRandomId(
-  model: mongooseType.Model<any>
+  model: mongooseType.Model<any>,
 ): Promise<mongooseType.Types.ObjectId | null> {
   const count = await model.estimatedDocumentCount();
   if (count === 0) return null;
@@ -86,7 +90,7 @@ function setDeep(target: Record<string, any>, pathStr: string, value: any) {
 
 export async function seedDatabase(
   mongoose: typeof mongooseType,
-  options: SeedOptions
+  options: SeedOptions,
 ): Promise<SeedSummary> {
   ensureNotProduction();
 
@@ -136,49 +140,69 @@ export async function seedDatabase(
       throw new Error(
         `SeedSmith: Failed to extract schema for model '${name}'. ${
           e?.message || e
-        }`
+        }`,
       );
     }
+  }
+
+  // Create adapter (use provided or default to Mongoose)
+  const adapter: SeedAdapter =
+    options.adapter ?? createMongooseAdapter(mongoose);
+
+  // Start session if transactions enabled
+  let session: SeedSession | null = null;
+  if (useTransactions && adapter.startSession) {
+    session = await adapter.startSession();
   }
 
   // Context to resolve refs
   const ctx = {
     models,
-    fetchRandomId: async (modelName: string) =>
-      fetchRandomId(models[modelName]),
+    fetchRandomId: async (modelName: string) => {
+      const model = models[modelName];
+      if (!model) return null;
+      return fetchRandomId(model);
+    },
     createStub: async (modelName: string) => {
       const model = models[modelName];
       const descriptor = descriptors[modelName];
+      // Guard: if model or descriptor missing, return a new ObjectId as fallback
+      if (!model || !descriptor) {
+        return new mongoose.Types.ObjectId();
+      }
       const resolver = makeRefResolver(ctx);
       const doc: Record<string, any> = {};
       for (const field of descriptor.fields) {
         if (field.ref) continue; // avoid infinite recursion on stubs
+        if (field.path === "_id") continue; // let Mongoose generate _id
         doc[field.path] = await generateValue(field, resolver);
       }
-      const created = await model.create(doc);
-      return created._id as mongooseType.Types.ObjectId;
+      // Pass session to create if available
+      const created = await model.create([doc], {
+        session: session && "raw" in session ? (session as any).raw : undefined,
+      });
+      const result = Array.isArray(created) ? created[0] : created;
+      return result._id as mongooseType.Types.ObjectId;
     },
   };
   const refResolver = makeRefResolver(ctx);
 
   const summary: SeedSummary = { inserted: {}, durationMs: 0 };
 
-  const session = useTransactions ? await mongoose.startSession() : null;
-  if (session) session.startTransaction();
-
   try {
-    // Optionally drop collections
+    // Optionally drop collections via adapter
     if (dropBeforeSeed) {
       for (const name of Object.keys(models)) {
         try {
-          await models[name].collection.drop();
+          const adapterModel = adapter.getModel(name);
+          await adapterModel.drop();
         } catch (e: any) {
           // ignore if collection doesn't exist
           if (e && e.codeName !== "NamespaceNotFound") {
             throw new Error(
               `SeedSmith: Failed to drop collection for '${name}'. ${
                 e?.message || e
-              }`
+              }`,
             );
           }
         }
@@ -192,7 +216,7 @@ export async function seedDatabase(
       const countForModel =
         typeof docsPerModel === "number"
           ? docsPerModel
-          : docsPerModel[name] ?? defaults.docsPerModel;
+          : (docsPerModel[name] ?? defaults.docsPerModel);
       const docs: Record<string, any>[] = [];
       for (let i = 0; i < countForModel; i++) {
         const doc: Record<string, any> = {};
@@ -206,50 +230,43 @@ export async function seedDatabase(
             throw new Error(
               `SeedSmith: Failed to generate value for ${name}.${field.path}. ${
                 e?.message || e
-              }`
+              }`,
             );
           }
         }
         docs.push(doc);
       }
 
-      // Insert with small retry for uniqueness errors
+      // Insert via adapter with retry for uniqueness errors
+      const adapterModel = adapter.getModel(name);
       let inserted = 0;
       try {
-        const createdAll = await model.create(docs, {
-          session: session ?? undefined,
-        });
-        const createdCount = Array.isArray(createdAll)
-          ? createdAll.length
-          : createdAll
-          ? 1
-          : 0;
-        inserted += createdCount;
+        inserted = await adapterModel.insertMany(docs, session);
       } catch (e: any) {
         logger.warn(
-          `Batch create failed for '${name}'. Falling back to individual inserts. ${
+          `Batch insert failed for '${name}'. Falling back to individual inserts. ${
             e?.message || e
-          }`
+          }`,
         );
         // retry individually
         for (const d of docs) {
           let attempts = 0;
-          while (attempts < 3) {
+          const MAX_RETRIES = 3;
+          while (attempts < MAX_RETRIES) {
             try {
-              const created = await model.create(d, {
-                session: session ?? undefined,
-              });
-              inserted += created ? 1 : 0;
+              await adapterModel.insertOne(d, session);
+              inserted += 1;
               break;
             } catch (err: any) {
               attempts++;
               // mutate one field to try unique again
               const field = descriptor.fields.find(
-                (f) => f.instance === "String" || f.instance === "Number"
+                (f) => f.instance === "String" || f.instance === "Number",
               );
-              if (field)
+              if (field) {
                 d[field.path] = await generateValue(field, refResolver);
-              if (attempts >= 3) throw err;
+              }
+              if (attempts >= MAX_RETRIES) throw err;
             }
           }
         }
@@ -259,14 +276,14 @@ export async function seedDatabase(
       logger.info(`Seeded ${inserted} document(s) for '${name}'.`);
     }
 
-    if (session) await session.commitTransaction();
+    if (session) await session.commit();
   } catch (err) {
-    if (session) await session.abortTransaction();
+    if (session) await session.abort();
     const message =
       err && (err as any).message ? (err as any).message : String(err);
     throw new Error(`SeedSmith: Seeding failed. ${message}`);
   } finally {
-    if (session) session.endSession();
+    if (session) await session.end();
     summary.durationMs = Date.now() - start;
   }
 
