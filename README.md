@@ -1,24 +1,29 @@
 # SeedSmith
 
-A Node.js + TypeScript CLI and library that auto-generates MongoDB seed data from Mongoose schemas.
+[![CI](https://github.com/alieutech/seedsmith/actions/workflows/ci.yml/badge.svg)](https://github.com/alieutech/seedsmith/actions/workflows/ci.yml)
+[![npm version](https://badge.fury.io/js/@alieutech%2Fseedsmith.svg)](https://www.npmjs.com/package/@alieutech/seedsmith)
+
+A Node.js + TypeScript CLI and library that auto-generates seed data for MongoDB (Mongoose) and Prisma with realistic fake data.
 
 ## Features
 
-- Uses `@faker-js/faker` to generate realistic values
-- Inspects Mongoose schemas automatically
-- Handles refs by linking to existing docs or creating stubs
-- Prevents seeding when `NODE_ENV=production`
+- 🎭 Uses `@faker-js/faker` to generate realistic values
+- 🔍 Inspects Mongoose schemas automatically
+- 🔗 Handles refs by linking to existing docs or creating stubs
+- 🛡️ Prevents seeding when `NODE_ENV=production`
+- 🔌 Pluggable adapter pattern for multiple ORMs
+- 📦 Built-in adapters: Mongoose, Prisma
+- 🎲 Deterministic seeding via seed option
+- 🔄 Transaction support
+- 🎯 Smart field-name mapping (email, phone, price, etc.)
 
 ## Install
 
 ```bash
-npm install
-```
+npm install @alieutech/seedsmith
 
-## Build
-
-```bash
-npm run build
+# or for CLI usage
+npm install -g @alieutech/seedsmith
 ```
 
 ## CLI usage
@@ -87,6 +92,49 @@ require("./models/post");
 
 // then call seedDatabase
 await seedDatabase(mongoose, { docsPerModel: 10 });
+```
+
+## Using with Prisma
+
+SeedSmith supports Prisma via the adapter pattern:
+
+```ts
+import { PrismaClient } from '@prisma/client';
+import { createPrismaAdapter } from '@alieutech/seedsmith';
+
+const prisma = new PrismaClient();
+
+const adapter = createPrismaAdapter(prisma, {
+  models: [
+    { name: 'user' },           // model name must match Prisma schema (lowercase)
+    { name: 'post' },
+    { name: 'comment', idField: 'commentId' }, // custom ID field
+  ]
+});
+
+// Note: Currently requires Mongoose for schema extraction
+// Pure Prisma seeding (without Mongoose) coming soon
+await seedDatabase(mongoose, { 
+  adapter,
+  docsPerModel: 10,
+});
+
+await prisma.$disconnect();
+```
+
+## Advanced Options
+
+```ts
+await seedDatabase(mongoose, {
+  modelsPath: './models',           // auto-load model files
+  docsPerModel: 20,                 // or { User: 50, Post: 100 }
+  includeModels: ['User', 'Post'],  // filter models
+  excludeModels: ['Log'],           // exclude models
+  dropBeforeSeed: true,             // drop collections first
+  useTransactions: true,            // wrap in transaction
+  seed: 12345,                      // deterministic faker seed
+  verbose: true,                    // detailed logging
+});
 ```
 
 ## Notes
