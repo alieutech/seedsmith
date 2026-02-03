@@ -99,22 +99,22 @@ await seedDatabase(mongoose, { docsPerModel: 10 });
 SeedSmith supports Prisma via the adapter pattern:
 
 ```ts
-import { PrismaClient } from '@prisma/client';
-import { createPrismaAdapter } from '@alieutech/seedsmith';
+import { PrismaClient } from "@prisma/client";
+import { createPrismaAdapter } from "@alieutech/seedsmith";
 
 const prisma = new PrismaClient();
 
 const adapter = createPrismaAdapter(prisma, {
   models: [
-    { name: 'user' },           // model name must match Prisma schema (lowercase)
-    { name: 'post' },
-    { name: 'comment', idField: 'commentId' }, // custom ID field
-  ]
+    { name: "user" }, // model name must match Prisma schema (lowercase)
+    { name: "post" },
+    { name: "comment", idField: "commentId" }, // custom ID field
+  ],
 });
 
 // Note: Currently requires Mongoose for schema extraction
 // Pure Prisma seeding (without Mongoose) coming soon
-await seedDatabase(mongoose, { 
+await seedDatabase(mongoose, {
   adapter,
   docsPerModel: 10,
 });
@@ -126,14 +126,14 @@ await prisma.$disconnect();
 
 ```ts
 await seedDatabase(mongoose, {
-  modelsPath: './models',           // auto-load model files
-  docsPerModel: 20,                 // or { User: 50, Post: 100 }
-  includeModels: ['User', 'Post'],  // filter models
-  excludeModels: ['Log'],           // exclude models
-  dropBeforeSeed: true,             // drop collections first
-  useTransactions: true,            // wrap in transaction
-  seed: 12345,                      // deterministic faker seed
-  verbose: true,                    // detailed logging
+  modelsPath: "./models", // auto-load model files
+  docsPerModel: 20, // or { User: 50, Post: 100 }
+  includeModels: ["User", "Post"], // filter models
+  excludeModels: ["Log"], // exclude models
+  dropBeforeSeed: true, // drop collections first
+  useTransactions: true, // wrap in transaction
+  seed: 12345, // deterministic faker seed
+  verbose: true, // detailed logging
 });
 ```
 
