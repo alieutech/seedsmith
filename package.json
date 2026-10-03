@@ -3,6 +3,10 @@
   "version": "0.2.0",
   "description": "CLI + library to auto-generate seed data for MongoDB (Mongoose) and Prisma with realistic fake data",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alieutech/seedsmith.git"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
