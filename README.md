@@ -8,11 +8,12 @@ A Node.js + TypeScript CLI and library that auto-generates seed data for MongoDB
 ## Features
 
 - 🎭 Uses `@faker-js/faker` to generate realistic values
-- 🔍 Inspects Mongoose schemas automatically
-- 🔗 Handles refs by linking to existing docs or creating stubs
+- 🔍 Inspects Mongoose schemas automatically, including arrays, nested subdocuments and maps
+- ✅ Respects `enum`, `min`, `max`, `minlength`, `maxlength` and simple `match` validators
+- 🔗 Handles refs and relations by seeding referenced models first and linking to their rows
 - 🛡️ Prevents seeding when `NODE_ENV=production`
 - 🔌 Pluggable adapter pattern for multiple ORMs
-- 📦 Built-in adapters: Mongoose, Prisma
+- 📦 Works with Mongoose and with Prisma (reads your Prisma schema directly)
 - 🎲 Deterministic seeding via seed option
 - 🔄 Transaction support
 - 🎯 Smart field-name mapping (email, phone, price, etc.)
@@ -20,11 +21,17 @@ A Node.js + TypeScript CLI and library that auto-generates seed data for MongoDB
 ## Install
 
 ```bash
+# Mongoose projects
+npm install @alieutech/seedsmith mongoose
+
+# Prisma projects (no mongoose needed)
 npm install @alieutech/seedsmith
 
-# or for CLI usage
-npm install -g @alieutech/seedsmith
+# CLI usage (MongoDB only)
+npm install -g @alieutech/seedsmith mongoose
 ```
+
+Requires Node.js 20.19 or newer. `mongoose` (v8 or v9) is an optional peer dependency, so SeedSmith uses the same copy as your models.
 
 ## CLI usage
 
@@ -40,21 +47,32 @@ seedsmith \
   --uri "$MONGO_URI" \
   --models ./models \
   --count 25
-```
 
 # Include/Exclude models
-
 seedsmith --uri mongodb://localhost:27017/mydb --models ./models --include User,Post --exclude Log
 
 # Drop collections before seeding
-
 seedsmith --uri mongodb://localhost:27017/mydb --models ./models --drop
+```
 
-````
+### CLI options
+
+| Flag | Description |
+| --- | --- |
+| `-u, --uri <uri>` | MongoDB connection string (required) |
+| `-m, --models <dir>` | Directory of model files to load |
+| `-c, --count <n>` | Documents to create per model |
+| `-i, --include <A,B>` | Only seed these models |
+| `-e, --exclude <X,Y>` | Skip these models |
+| `--drop` | Drop collections before seeding |
+| `--transactions` | Wrap seeding in a transaction (requires a replica set) |
+| `--seed <n>` | Seed for deterministic fake data |
+| `--verbose` | Detailed logging |
+| `-h, --help` | Show help |
 
 ### Optional config file
 
-Create `seed.config.js` in your project root to customize defaults:
+Create `seed.config.js` in your project root to customize defaults. Flags override these values:
 
 ```js
 // seed.config.js
@@ -64,7 +82,7 @@ module.exports = {
   dropBeforeSeed: false,
   useTransactions: false,
 };
-````
+```
 
 ## Library usage
 
@@ -96,30 +114,49 @@ await seedDatabase(mongoose, { docsPerModel: 10 });
 
 ## Using with Prisma
 
-SeedSmith supports Prisma via the adapter pattern:
+`seedPrisma` reads your models, enums and relations from Prisma itself, so no Mongoose models are needed:
 
 ```ts
-import { PrismaClient } from "@prisma/client";
-import { createPrismaAdapter } from "@alieutech/seedsmith";
+import { PrismaClient, Prisma } from "@prisma/client";
+import { seedPrisma } from "@alieutech/seedsmith";
 
 const prisma = new PrismaClient();
 
-const adapter = createPrismaAdapter(prisma, {
-  models: [
-    { name: "user" }, // model name must match Prisma schema (lowercase)
-    { name: "post" },
-    { name: "comment", idField: "commentId" }, // custom ID field
-  ],
+const summary = await seedPrisma(prisma, {
+  datamodel: Prisma.dmmf.datamodel, // optional: read from the client if omitted
+  docsPerModel: 10, // or { User: 50, Post: 100 }
+  includeModels: ["User", "Post"], // Prisma model names
+  dropBeforeSeed: true, // deleteMany on the seeded models, dependents first
+  useTransactions: false, // wrap the run in prisma.$transaction
+  seed: 12345,
 });
 
-// Note: Currently requires Mongoose for schema extraction
-// Pure Prisma seeding (without Mongoose) coming soon
-await seedDatabase(mongoose, {
-  adapter,
-  docsPerModel: 10,
-});
-
+console.log(summary.inserted); // { User: 10, Post: 10 }
 await prisma.$disconnect();
+```
+
+How it handles your schema:
+
+- Fields with `@default(...)`, `@updatedAt` or generated values are left for Prisma and the database to fill.
+- Foreign keys point at real rows. Related models are seeded first; if a required relation has no row to point at, one is created (and counted in the summary).
+- One-to-one relations get a different target row each time.
+- Optional relations are left empty when there is nothing to point at, including self relations on the first rows.
+- Implicit many-to-many relations (lists on both sides, no foreign key) are not linked.
+- If a model's unique constraints cannot be satisfied after a few attempts, seeding of that model stops with a warning.
+
+Verified against Prisma 6 with SQLite. On PostgreSQL, a unique-constraint collision inside a transaction aborts the transaction, so prefer `useTransactions: false` there.
+
+### Prisma adapter for `seedDatabase` (legacy)
+
+`createPrismaAdapter` routes the writes of `seedDatabase` to Prisma, but still reads schemas from Mongoose models that mirror your Prisma models. Prefer `seedPrisma` above.
+
+```ts
+import { createPrismaAdapter, seedDatabase } from "@alieutech/seedsmith";
+
+const adapter = createPrismaAdapter(prisma, {
+  models: [{ name: "user" }, { name: "comment", idField: "commentId" }],
+});
+await seedDatabase(mongoose, { adapter, docsPerModel: 10 });
 ```
 
 ## Advanced Options
@@ -136,6 +173,13 @@ await seedDatabase(mongoose, {
   verbose: true, // detailed logging
 });
 ```
+
+## Supported schema features
+
+- Types: String, Number, Boolean, Date, ObjectId, Decimal128, Buffer, UUID, BigInt, Mixed, Map, arrays of any of these, nested subdocuments and arrays of subdocuments. Fields of any other type are left unset with a warning.
+- Validators: `enum`, `min`, `max`, `minlength`, `maxlength`. `match` is best-effort: simple patterns such as `/^\d{5}$/` are satisfied; for complex ones the generated value may fail validation.
+- Fields with a schema `default` are left for Mongoose to fill.
+- Refs: referenced models are seeded first. A ref to a model outside the run links to its existing documents; if it has none, optional refs are left empty and required refs get a placeholder id (with a warning).
 
 ## Notes
 

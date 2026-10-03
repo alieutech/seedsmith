@@ -23,9 +23,9 @@ describe("SeedSmith integration", () => {
 
   it("seeds users and posts with refs and realistic fields", async () => {
     // Register models explicitly for this test run
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     require(path.resolve(__dirname, "../examples/models/user.js"));
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     require(path.resolve(__dirname, "../examples/models/post.js"));
 
     const summary = await seedDatabase(mongoose, {
@@ -37,7 +37,17 @@ describe("SeedSmith integration", () => {
       verbose: true,
     });
 
-    // Rely on actual DB counts rather than summary for robustness
+    expect(summary.inserted).toEqual({ User: 5, Post: 5 });
+    expect(await mongoose.model("User").countDocuments()).toBe(5);
+    const userIds = (await mongoose.model("User").find().lean()).map((u) =>
+      String(u._id),
+    );
+    const posts = await mongoose.model("Post").find().lean();
+    expect(posts).toHaveLength(5);
+    for (const post of posts as any[]) {
+      expect(userIds).toContain(String(post.author));
+      expect(post.createdAt).toBeInstanceOf(Date);
+    }
 
     expect(summary).toHaveProperty("inserted");
     expect(summary).toHaveProperty("durationMs");

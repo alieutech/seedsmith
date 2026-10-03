@@ -4,11 +4,26 @@ import path from "path";
 import fs from "fs";
 import { ensureNotProduction } from "./utils/envCheck";
 import { defaults } from "./config/defaults";
-import { extractSchema, type ModelDescriptor } from "./mongoose/extractSchema";
-import { generateValue } from "./mongoose/generateValue";
-import { makeRefResolver } from "./mongoose/relationResolver";
+import {
+  extractSchema,
+  type FieldDescriptor,
+  type ModelDescriptor,
+} from "./mongoose/extractSchema";
+import {
+  buildDocument,
+  generateValue,
+  setDeep,
+} from "./mongoose/generateValue";
+import {
+  makeRefResolver,
+  type ResolveContext,
+} from "./mongoose/relationResolver";
 import { createLogger, type Logger } from "./utils/logger";
-import type { SeedAdapter, SeedSession } from "./adapters/types";
+import {
+  PartialInsertError,
+  type SeedAdapter,
+  type SeedSession,
+} from "./adapters/types";
 import { createMongooseAdapter } from "./adapters/mongooseAdapter";
 
 export interface SeedOptions {
@@ -57,7 +72,7 @@ function loadModelsFromDir(modelsPath: string) {
     .forEach((f) => {
       const full = path.join(abs, f);
       try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
         require(full);
       } catch (e: any) {
         throw new Error(
@@ -69,23 +84,48 @@ function loadModelsFromDir(modelsPath: string) {
 
 async function fetchRandomId(
   model: mongooseType.Model<any>,
+  rawSession?: mongooseType.ClientSession,
 ): Promise<mongooseType.Types.ObjectId | null> {
-  const count = await model.estimatedDocumentCount();
+  // Inside a transaction, read through the session so uncommitted documents are visible
+  const count = rawSession
+    ? await model.countDocuments({}).session(rawSession)
+    : await model.estimatedDocumentCount();
   if (count === 0) return null;
   const skip = faker.number.int({ min: 0, max: Math.max(0, count - 1) });
-  const doc: any = await model.findOne({}, { _id: 1 }).skip(skip).lean();
+  const query = model.findOne({}, { _id: 1 }).skip(skip).lean();
+  if (rawSession) query.session(rawSession);
+  const doc: any = await query;
   return doc?._id ?? null;
 }
 
-function setDeep(target: Record<string, any>, pathStr: string, value: any) {
-  const parts = pathStr.split(".");
-  let cur: any = target;
-  for (let i = 0; i < parts.length - 1; i++) {
-    const key = parts[i];
-    if (cur[key] == null || typeof cur[key] !== "object") cur[key] = {};
-    cur = cur[key];
+function collectRefs(fields: FieldDescriptor[], out: Set<string>) {
+  for (const field of fields) {
+    if (field.ref) out.add(field.ref);
+    if (field.item) collectRefs([field.item], out);
+    if (field.of) collectRefs([field.of], out);
+    if (field.fields) collectRefs(field.fields, out);
   }
-  cur[parts[parts.length - 1]] = value;
+}
+
+// Order models so that referenced models are seeded before the models that point at them
+function orderByRefs(
+  names: string[],
+  descriptors: Record<string, ModelDescriptor>,
+): string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const visit = (name: string) => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const refs = new Set<string>();
+    collectRefs(descriptors[name].fields, refs);
+    for (const ref of refs) {
+      if (descriptors[ref]) visit(ref);
+    }
+    ordered.push(name);
+  };
+  names.forEach(visit);
+  return ordered;
 }
 
 export async function seedDatabase(
@@ -125,7 +165,8 @@ export async function seedDatabase(
   const models: Record<string, mongooseType.Model<any>> = {};
   for (const name of targetNames) {
     try {
-      models[name] = mongoose.model(name);
+      // Cast: the generic defaults of Model differ between Mongoose 8 and 9
+      models[name] = mongoose.model(name) as mongooseType.Model<any>;
     } catch (e: any) {
       logger.warn(`Model '${name}' not registered with Mongoose. Skipping.`);
     }
@@ -154,33 +195,44 @@ export async function seedDatabase(
   if (useTransactions && adapter.startSession) {
     session = await adapter.startSession();
   }
+  const rawSession: mongooseType.ClientSession | undefined =
+    session && "raw" in session ? (session as any).raw : undefined;
+
+  const warned = new Set<string>();
+  const warnOnce = (message: string) => {
+    if (warned.has(message)) return;
+    warned.add(message);
+    logger.warn(message);
+  };
+  const genOptions = { warn: warnOnce };
 
   // Context to resolve refs
-  const ctx = {
+  const ctx: ResolveContext = {
     models,
     fetchRandomId: async (modelName: string) => {
-      const model = models[modelName];
+      // Models outside this run can still be linked to if they already have documents
+      const model = models[modelName] ?? mongoose.models[modelName];
       if (!model) return null;
-      return fetchRandomId(model);
+      return fetchRandomId(model, rawSession);
     },
     createStub: async (modelName: string) => {
       const model = models[modelName];
       const descriptor = descriptors[modelName];
-      // Guard: if model or descriptor missing, return a new ObjectId as fallback
+      // Guard: never write to a model that is not part of this run
       if (!model || !descriptor) {
-        return new mongoose.Types.ObjectId();
+        warnOnce(
+          `Ref target '${modelName}' is not being seeded and has no documents. ` +
+            `Optional refs to it are left empty; required refs get a placeholder id.`,
+        );
+        return null;
       }
-      const resolver = makeRefResolver(ctx);
-      const doc: Record<string, any> = {};
-      for (const field of descriptor.fields) {
-        if (field.ref) continue; // avoid infinite recursion on stubs
-        if (field.path === "_id") continue; // let Mongoose generate _id
-        doc[field.path] = await generateValue(field, resolver);
-      }
-      // Pass session to create if available
-      const created = await model.create([doc], {
-        session: session && "raw" in session ? (session as any).raw : undefined,
+      // skipRefs avoids infinite recursion on stubs
+      const doc = await buildDocument(descriptor.fields, refResolver, {
+        ...genOptions,
+        skipRefs: true,
       });
+      // Pass session to create if available
+      const created = await model.create([doc], { session: rawSession });
       const result = Array.isArray(created) ? created[0] : created;
       return result._id as mongooseType.Types.ObjectId;
     },
@@ -209,32 +261,32 @@ export async function seedDatabase(
       }
     }
 
-    // Seed each model
-    for (const [name, model] of Object.entries(models)) {
+    // Seed each model, referenced models first
+    for (const name of orderByRefs(Object.keys(models), descriptors)) {
       const descriptor = descriptors[name];
 
       const countForModel =
         typeof docsPerModel === "number"
           ? docsPerModel
           : (docsPerModel[name] ?? defaults.docsPerModel);
+      if (!Number.isInteger(countForModel) || countForModel < 0) {
+        throw new Error(
+          `SeedSmith: docsPerModel for '${name}' must be a non-negative integer, got ${countForModel}.`,
+        );
+      }
       const docs: Record<string, any>[] = [];
       for (let i = 0; i < countForModel; i++) {
-        const doc: Record<string, any> = {};
-        for (const field of descriptor.fields) {
-          // Skip _id so Mongo/Mongoose can generate a proper ObjectId
-          if (field.path === "_id") continue;
-          try {
-            const val = await generateValue(field, refResolver);
-            setDeep(doc, field.path, val);
-          } catch (e: any) {
-            throw new Error(
-              `SeedSmith: Failed to generate value for ${name}.${field.path}. ${
-                e?.message || e
-              }`,
-            );
-          }
+        try {
+          docs.push(
+            await buildDocument(descriptor.fields, refResolver, genOptions),
+          );
+        } catch (e: any) {
+          throw new Error(
+            `SeedSmith: Failed to generate a document for '${name}'. ${
+              e?.message || e
+            }`,
+          );
         }
-        docs.push(doc);
       }
 
       // Insert via adapter with retry for uniqueness errors
@@ -248,8 +300,24 @@ export async function seedDatabase(
             e?.message || e
           }`,
         );
+        // Documents written before the failure must not be inserted twice
+        const alreadyInserted =
+          e instanceof PartialInsertError ? e.insertedCount : 0;
+        inserted = alreadyInserted;
+        // On retry, regenerate the fields that can collide
+        const uniqueFields = descriptor.fields.filter(
+          (f) => f.unique && f.path !== "_id",
+        );
+        const fallbackField = descriptor.fields.find(
+          (f) => f.instance === "String" || f.instance === "Number",
+        );
+        const retryFields = uniqueFields.length
+          ? uniqueFields
+          : fallbackField
+            ? [fallbackField]
+            : [];
         // retry individually
-        for (const d of docs) {
+        for (const d of docs.slice(alreadyInserted)) {
           let attempts = 0;
           const MAX_RETRIES = 3;
           while (attempts < MAX_RETRIES) {
@@ -259,14 +327,12 @@ export async function seedDatabase(
               break;
             } catch (err: any) {
               attempts++;
-              // mutate one field to try unique again
-              const field = descriptor.fields.find(
-                (f) => f.instance === "String" || f.instance === "Number",
-              );
-              if (field) {
-                d[field.path] = await generateValue(field, refResolver);
-              }
               if (attempts >= MAX_RETRIES) throw err;
+              // regenerate the colliding fields to try unique again
+              for (const field of retryFields) {
+                const val = await generateValue(field, refResolver, genOptions);
+                if (val !== undefined) setDeep(d, field.path, val);
+              }
             }
           }
         }

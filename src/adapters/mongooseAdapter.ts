@@ -1,5 +1,10 @@
 import type mongoose from "mongoose";
-import type { SeedAdapter, SeedAdapterModel, SeedSession } from "./types";
+import {
+  PartialInsertError,
+  type SeedAdapter,
+  type SeedAdapterModel,
+  type SeedSession,
+} from "./types";
 
 /**
  * Wraps a Mongoose ClientSession as a SeedSession.
@@ -54,8 +59,18 @@ class MongooseAdapterModel implements SeedAdapterModel<mongoose.Types.ObjectId> 
   ): Promise<number> {
     const mongooseSession =
       session && session instanceof MongooseSession ? session.raw : undefined;
-    const created = await this.model.create(docs, { session: mongooseSession });
-    return Array.isArray(created) ? created.length : created ? 1 : 0;
+    // Insert in order, one at a time: sessions require it, and it lets us report
+    // exactly how many documents were written if one of them fails.
+    let inserted = 0;
+    for (const doc of docs) {
+      try {
+        await this.model.create([doc], { session: mongooseSession });
+      } catch (e: any) {
+        throw new PartialInsertError(e?.message || String(e), inserted, e);
+      }
+      inserted++;
+    }
+    return inserted;
   }
 
   async insertOne(
@@ -96,7 +111,8 @@ export class MongooseAdapter implements SeedAdapter<mongoose.Types.ObjectId> {
   getModel(name: string): SeedAdapterModel<mongoose.Types.ObjectId> {
     let cached = this.modelCache.get(name);
     if (!cached) {
-      const model = this.mongooseInstance.model(name);
+      // Cast: the generic defaults of Model differ between Mongoose 8 and 9
+      const model = this.mongooseInstance.model(name) as mongoose.Model<any>;
       cached = new MongooseAdapterModel(model);
       this.modelCache.set(name, cached);
     }

@@ -2,6 +2,7 @@ export { seedDatabase } from "./seed";
 export type { SeedOptions, SeedSummary } from "./seed";
 
 // Adapter types for custom ORM implementations
+export { PartialInsertError } from "./adapters/types";
 export type {
   SeedAdapter,
   SeedAdapterModel,
@@ -14,7 +15,15 @@ export {
   MongooseAdapter,
 } from "./adapters/mongooseAdapter";
 
-// Prisma adapter
+// Prisma seeding (reads the schema from Prisma, no Mongoose needed)
+export { seedPrisma, type PrismaSeedOptions } from "./prisma/seedPrisma";
+export type {
+  PrismaDatamodel,
+  PrismaModel,
+  PrismaField,
+} from "./prisma/datamodel";
+
+// Prisma adapter for seedDatabase (requires mirrored Mongoose models)
 export {
   createPrismaAdapter,
   PrismaAdapter,

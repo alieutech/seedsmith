@@ -200,7 +200,7 @@ export interface PrismaAdapterOptions {
  *   ]
  * });
  *
- * // Use with seedWithAdapter or pass to seedDatabase
+ * // Pass the adapter to seedDatabase via the `adapter` option
  * ```
  */
 export class PrismaAdapter<ID = string | number> implements SeedAdapter<ID> {
@@ -238,7 +238,11 @@ export class PrismaAdapter<ID = string | number> implements SeedAdapter<ID> {
   getModel(name: string): SeedAdapterModel<ID> {
     let cached = this.modelCache.get(name);
     if (!cached) {
-      const config = this.modelConfigs.get(name);
+      // Mongoose model names are usually PascalCase ("User") while Prisma
+      // delegates are camelCase ("user"), so accept either form.
+      const config =
+        this.modelConfigs.get(name) ??
+        this.modelConfigs.get(name.charAt(0).toLowerCase() + name.slice(1));
       if (!config) {
         throw new Error(
           `Model '${name}' not registered with PrismaAdapter. ` +

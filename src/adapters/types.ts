@@ -6,10 +6,26 @@ export interface SeedSession {
   end(): void | Promise<void>;
 }
 
+/**
+ * Thrown by insertMany when a batch fails part-way, so the caller knows how many
+ * documents (counted from the start of the batch) were already written.
+ */
+export class PartialInsertError extends Error {
+  constructor(
+    message: string,
+    readonly insertedCount: number,
+    readonly cause?: unknown
+  ) {
+    super(message);
+    this.name = "PartialInsertError";
+  }
+}
+
 export interface SeedAdapterModel<ID = unknown> {
   name: string;
   estimatedCount(): Promise<number>;
   randomId(): Promise<ID | null>;
+  // May throw PartialInsertError if some documents were written before a failure
   insertMany(
     docs: Record<string, any>[],
     session?: SeedSession | null
