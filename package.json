@@ -73,7 +73,7 @@
     "globals": "^17.13.0",
     "jest": "^30.5.2",
     "mongodb-memory-server": "^10.1.4",
-    "mongoose": "^8.5.2",
+    "mongoose": "^9.10.4",
     "ts-jest": "^29.4.14",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
