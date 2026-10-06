@@ -1,6 +1,7 @@
 import type { SeedOptions } from "./seed";
 
 export const USAGE = `Usage: seedsmith --uri <mongo-uri> [options]
+       seedsmith --dry-run --models <dir> [options]
 
 Options:
   -u, --uri <uri>        MongoDB connection string (required)
@@ -10,6 +11,8 @@ Options:
   -e, --exclude <X,Y>    Skip these models
       --drop             Drop collections before seeding
       --transactions     Wrap seeding in a transaction
+      --dry-run          Show sample documents without writing anything
+                         (--uri is optional; without it refs are not looked up)
       --seed <n>         Seed for deterministic fake data
       --verbose          Detailed logging
   -h, --help             Show this help
@@ -79,6 +82,7 @@ export function resolveCliOptions(
       dropBeforeSeed: hasFlag(argv, "--drop") || fileConfig.dropBeforeSeed,
       useTransactions:
         hasFlag(argv, "--transactions") || fileConfig.useTransactions,
+      dryRun: hasFlag(argv, "--dry-run") || fileConfig.dryRun,
       seed: seed ?? fileConfig.seed,
       verbose: hasFlag(argv, "--verbose") || fileConfig.verbose,
     },

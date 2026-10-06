@@ -286,12 +286,14 @@ export async function generateValue(
 export async function buildDocument(
   fields: FieldDescriptor[],
   resolveRef: RefResolver,
-  opts: GenerateOptions = {}
+  opts: GenerateOptions = {},
+  skip?: (path: string) => boolean
 ): Promise<Record<string, any>> {
   const doc: Record<string, any> = {};
   for (const field of fields) {
     // Skip _id so Mongo/Mongoose can generate a proper ObjectId
     if (field.path === "_id") continue;
+    if (skip?.(field.path)) continue;
     let val: any;
     try {
       val = await generateValue(field, resolveRef, opts);

@@ -25,6 +25,12 @@ import {
   type SeedSession,
 } from "./adapters/types";
 import { createMongooseAdapter } from "./adapters/mongooseAdapter";
+import {
+  applyOverrides,
+  isOverridden,
+  validateOverrides,
+  type SeedOverrides,
+} from "./overrides";
 
 export interface SeedOptions {
   modelsPath?: string; // Directory containing model files that register with mongoose
@@ -34,6 +40,10 @@ export interface SeedOptions {
   dropBeforeSeed?: boolean;
   useTransactions?: boolean;
   seed?: number; // deterministic seeding
+  /** Fixed values or functions for specific fields, keyed by model name then field path */
+  overrides?: SeedOverrides;
+  /** Generate and validate documents without writing anything; see `samples` in the summary */
+  dryRun?: boolean;
   verbose?: boolean;
   logger?: Logger;
   /** Optional adapter for ORM abstraction; defaults to Mongoose adapter */
@@ -43,6 +53,12 @@ export interface SeedOptions {
 export interface SeedSummary {
   inserted: Record<string, number>;
   durationMs: number;
+  /** Set when the run was a dry run: nothing was written */
+  dryRun?: boolean;
+  /** Dry run only: how many documents were generated per model */
+  generated?: Record<string, number>;
+  /** Dry run only: the generated documents per model */
+  samples?: Record<string, Record<string, any>[]>;
 }
 
 function normalizeList(input?: string[] | string): string[] | undefined {
@@ -152,6 +168,9 @@ export async function seedDatabase(
     logger.info(`Using deterministic seed: ${seed}`);
   }
 
+  const overrides = validateOverrides(options.overrides);
+  const dryRun = Boolean(options.dryRun);
+
   const start = Date.now();
   // Load models if a path is provided
   if (modelsPath) loadModelsFromDir(modelsPath);
@@ -192,7 +211,7 @@ export async function seedDatabase(
 
   // Start session if transactions enabled
   let session: SeedSession | null = null;
-  if (useTransactions && adapter.startSession) {
+  if (useTransactions && adapter.startSession && !dryRun) {
     session = await adapter.startSession();
   }
   const rawSession: mongooseType.ClientSession | undefined =
@@ -206,13 +225,59 @@ export async function seedDatabase(
   };
   const genOptions = { warn: warnOnce };
 
+  for (const [name, fields] of Object.entries(overrides ?? {})) {
+    const descriptor = descriptors[name];
+    if (!descriptor) {
+      warnOnce(`Overrides for '${name}' ignored: it is not being seeded.`);
+      continue;
+    }
+    for (const key of Object.keys(fields)) {
+      const known = descriptor.fields.some(
+        (f) =>
+          f.path === key ||
+          f.path.startsWith(`${key}.`) ||
+          key.startsWith(`${f.path}.`),
+      );
+      if (!known) {
+        warnOnce(
+          `Override '${name}.${key}' does not match a field in the schema.`,
+        );
+      }
+    }
+  }
+
+  // Builds one document for a model: generated values first, then its overrides
+  const docIndexes = new WeakMap<object, number>();
+  const docCounts: Record<string, number> = {};
+  const buildFor = async (name: string, opts: { skipRefs?: boolean } = {}) => {
+    const modelOverrides = overrides?.[name];
+    const doc = await buildDocument(
+      descriptors[name].fields,
+      refResolver,
+      { ...genOptions, ...opts },
+      (path) => isOverridden(path, modelOverrides),
+    );
+    const index = docCounts[name] ?? 0;
+    docCounts[name] = index + 1;
+    docIndexes.set(doc, index);
+    await applyOverrides(doc, modelOverrides, { model: name, index });
+    return doc;
+  };
+
   // Context to resolve refs
   const ctx: ResolveContext = {
     models,
     fetchRandomId: async (modelName: string) => {
+      // In a dry run, link to the documents generated so far
+      const generated = dryIds[modelName];
+      if (generated && generated.length) {
+        return faker.helpers.arrayElement(generated);
+      }
       // Models outside this run can still be linked to if they already have documents
       const model = models[modelName] ?? mongoose.models[modelName];
       if (!model) return null;
+      // A dry run may be offline; only read when there is a connection
+      if (dryRun && mongoose.connection?.readyState !== 1) return null;
       return fetchRandomId(model, rawSession);
     },
     createStub: async (modelName: string) => {
@@ -227,10 +292,8 @@ export async function seedDatabase(
         return null;
       }
       // skipRefs avoids infinite recursion on stubs
-      const doc = await buildDocument(descriptor.fields, refResolver, {
-        ...genOptions,
-        skipRefs: true,
-      });
+      const doc = await buildFor(modelName, { skipRefs: true });
+      if (dryRun) return (await recordDryDoc(modelName, doc))._id;
       // Pass session to create if available
       const created = await model.create([doc], { session: rawSession });
       const result = Array.isArray(created) ? created[0] : created;
@@ -241,9 +304,30 @@ export async function seedDatabase(
 
   const summary: SeedSummary = { inserted: {}, durationMs: 0 };
 
+  // Dry run: validate each document the way a save would, and keep it instead of writing it
+  const dryIds: Record<string, mongooseType.Types.ObjectId[]> = {};
+  const recordDryDoc = async (name: string, doc: Record<string, any>) => {
+    const instance = new models[name](doc);
+    try {
+      await instance.validate();
+    } catch (e: any) {
+      throw new Error(`'${name}' would fail validation. ${e?.message || e}`);
+    }
+    const stored = instance.toObject({ flattenMaps: true });
+    (dryIds[name] ??= []).push(stored._id);
+    ((summary.samples ??= {})[name] ??= []).push(stored);
+    return stored;
+  };
+  if (dryRun) {
+    summary.dryRun = true;
+    summary.generated = {};
+    summary.samples = {};
+    logger.info("Dry run: nothing will be written.");
+  }
+
   try {
     // Optionally drop collections via adapter
-    if (dropBeforeSeed) {
+    if (dropBeforeSeed && !dryRun) {
       for (const name of Object.keys(models)) {
         try {
           const adapterModel = adapter.getModel(name);
@@ -276,10 +360,9 @@ export async function seedDatabase(
       }
       const docs: Record<string, any>[] = [];
       for (let i = 0; i < countForModel; i++) {
+        let doc: Record<string, any>;
         try {
-          docs.push(
-            await buildDocument(descriptor.fields, refResolver, genOptions),
-          );
+          doc = await buildFor(name);
         } catch (e: any) {
           throw new Error(
             `SeedSmith: Failed to generate a document for '${name}'. ${
@@ -287,6 +370,17 @@ export async function seedDatabase(
             }`,
           );
         }
+        // Recorded one by one so later documents can reference earlier ones
+        if (dryRun) await recordDryDoc(name, doc);
+        else docs.push(doc);
+      }
+
+      if (dryRun) {
+        const generated = summary.samples?.[name]?.length ?? 0;
+        (summary.generated ??= {})[name] = generated;
+        summary.inserted[name] = 0;
+        logger.info(`Generated ${generated} document(s) for '${name}' (dry run).`);
+        continue;
       }
 
       // Insert via adapter with retry for uniqueness errors
@@ -305,10 +399,12 @@ export async function seedDatabase(
           e instanceof PartialInsertError ? e.insertedCount : 0;
         inserted = alreadyInserted;
         // On retry, regenerate the fields that can collide
-        const uniqueFields = descriptor.fields.filter(
-          (f) => f.unique && f.path !== "_id",
+        const modelOverrides = overrides?.[name];
+        const regenerable = descriptor.fields.filter(
+          (f) => f.path !== "_id" && !isOverridden(f.path, modelOverrides),
         );
-        const fallbackField = descriptor.fields.find(
+        const uniqueFields = regenerable.filter((f) => f.unique);
+        const fallbackField = regenerable.find(
           (f) => f.instance === "String" || f.instance === "Number",
         );
         const retryFields = uniqueFields.length
@@ -333,6 +429,11 @@ export async function seedDatabase(
                 const val = await generateValue(field, refResolver, genOptions);
                 if (val !== undefined) setDeep(d, field.path, val);
               }
+              // override functions get another chance to produce a unique value
+              await applyOverrides(d, modelOverrides, {
+                model: name,
+                index: docIndexes.get(d) ?? 0,
+              });
             }
           }
         }

@@ -7,6 +7,11 @@ import type { FieldDescriptor } from "../mongoose/extractSchema";
 import type { PrismaClientLike } from "../adapters/prismaAdapter";
 import type { SeedSummary } from "../seed";
 import {
+  applyOverrides,
+  validateOverrides,
+  type SeedOverrides,
+} from "../overrides";
+import {
   orderPlans,
   planModels,
   type PrismaDatamodel,
@@ -26,6 +31,14 @@ export interface PrismaSeedOptions {
   dropBeforeSeed?: boolean;
   useTransactions?: boolean;
   seed?: number; // deterministic seeding
+  /** Fixed values or functions for specific fields, keyed by model name then field name */
+  overrides?: SeedOverrides;
+  /**
+   * Generate rows without writing anything; see `samples` in the summary.
+   * Existing rows are still read so relations can point at them, and keys the
+   * database would generate are shown as placeholders.
+   */
+  dryRun?: boolean;
   verbose?: boolean;
   logger?: Logger;
 }
@@ -85,6 +98,9 @@ export async function seedPrisma(
     logger.info(`Using deterministic seed: ${seed}`);
   }
 
+  const overrides = validateOverrides(options.overrides);
+  const dryRun = Boolean(options.dryRun);
+
   const start = Date.now();
   const datamodel: PrismaDatamodel | undefined =
     options.datamodel ?? (prisma as any)._runtimeDataModel;
@@ -115,6 +131,22 @@ export async function seedPrisma(
     else logger.warn(`Model '${name}' not found in the Prisma schema. Skipping.`);
   }
   const included = new Set(targets.map((p) => p.name));
+
+  for (const [name, fields] of Object.entries(overrides ?? {})) {
+    const plan = plans.get(name);
+    if (!plan || !included.has(name)) {
+      warnOnce(`Overrides for '${name}' ignored: it is not being seeded.`);
+      continue;
+    }
+    for (const key of Object.keys(fields)) {
+      if (!plan.fieldNames.includes(key)) {
+        warnOnce(
+          `Override '${name}.${key}' does not match a field in the schema.`,
+        );
+      }
+    }
+  }
+  const rowCounts: Record<string, number> = {};
   const ordered = orderPlans(targets);
 
   const summary: SeedSummary = { inserted: {}, durationMs: 0 };
@@ -136,9 +168,12 @@ export async function seedPrisma(
       let rows = keyCache.get(modelName);
       if (!rows) {
         const plan = plans.get(modelName);
-        rows = plan
-          ? await delegateFor(plan).findMany({ take: KEY_CACHE_LIMIT })
-          : [];
+        // In a dry run with dropBeforeSeed, the seeded tables count as empty
+        const cleared = dryRun && dropBeforeSeed && included.has(modelName);
+        rows =
+          plan && !cleared
+            ? await delegateFor(plan).findMany({ take: KEY_CACHE_LIMIT })
+            : [];
         keyCache.set(modelName, rows!);
       }
       return rows!;
@@ -207,19 +242,55 @@ export async function seedPrisma(
       return insertStub(plan, rel, depth);
     };
 
-    const buildRow = async (plan: PrismaModelPlan, depth: number) => {
+    const buildRow = async (
+      plan: PrismaModelPlan,
+      depth: number,
+      index: number,
+    ) => {
+      const modelOverrides = overrides?.[plan.name];
+      const overridden = (field: string) =>
+        modelOverrides !== undefined &&
+        Object.prototype.hasOwnProperty.call(modelOverrides, field);
+
       const row: Record<string, any> = {};
       for (const field of plan.fields) {
+        if (overridden(field.path)) continue;
         const val = await generateField(field);
         if (val !== undefined) row[field.path] = val;
       }
       for (const rel of plan.relations) {
+        // An overridden foreign key decides the relation
+        if (rel.from.some(overridden)) continue;
         const target = await pickTarget(plan, rel, depth);
         if (!target) continue;
         rel.from.forEach((f, i) => {
           row[f] = target[rel.to[i]];
         });
       }
+      await applyOverrides(row, modelOverrides, { model: plan.name, index });
+      return row;
+    };
+
+    // Dry run: stand in for the row the database would return
+    const simulateCreate = async (
+      plan: PrismaModelPlan,
+      data: Record<string, any>,
+    ) => {
+      const existing = await keyRows(plan.name);
+      const row = { ...data };
+      for (const key of plan.databaseKeys) {
+        if (row[key.name] !== undefined) continue;
+        if (key.type === "Int" || key.type === "BigInt") {
+          const max = existing.reduce(
+            (m, r) => Math.max(m, Number(r[key.name]) || 0),
+            0,
+          );
+          row[key.name] = key.type === "BigInt" ? BigInt(max + 1) : max + 1;
+        } else if (key.type === "String") {
+          row[key.name] = faker.string.uuid();
+        }
+      }
+      ((summary.samples ??= {})[plan.name] ??= []).push(row);
       return row;
     };
 
@@ -229,10 +300,14 @@ export async function seedPrisma(
       depth: number,
     ): Promise<Record<string, any> | null> {
       const delegate = delegateFor(plan);
+      const index = rowCounts[plan.name] ?? 0;
+      rowCounts[plan.name] = index + 1;
       for (let attempt = 0; attempt < MAX_UNIQUE_RETRIES; attempt++) {
-        const data = await buildRow(plan, depth);
+        const data = await buildRow(plan, depth, index);
         try {
-          const created = await delegate.create({ data });
+          const created = dryRun
+            ? await simulateCreate(plan, data)
+            : await delegate.create({ data });
           keyCache.get(plan.name)?.push(created);
           return created;
         } catch (err: any) {
@@ -243,7 +318,7 @@ export async function seedPrisma(
       return null;
     }
 
-    if (dropBeforeSeed) {
+    if (dropBeforeSeed && !dryRun) {
       // Delete dependents first so foreign keys stay valid
       for (const plan of [...ordered].reverse()) {
         try {
@@ -288,12 +363,22 @@ export async function seedPrisma(
 
       summary.inserted[plan.name] =
         (summary.inserted[plan.name] ?? 0) + inserted;
-      logger.info(`Seeded ${inserted} row(s) for '${plan.name}'.`);
+      logger.info(
+        dryRun
+          ? `Generated ${inserted} row(s) for '${plan.name}' (dry run).`
+          : `Seeded ${inserted} row(s) for '${plan.name}'.`,
+      );
     }
   };
 
+  if (dryRun) {
+    summary.dryRun = true;
+    summary.samples = {};
+    logger.info("Dry run: nothing will be written.");
+  }
+
   try {
-    if (useTransactions) {
+    if (useTransactions && !dryRun) {
       await (prisma.$transaction as any)(run, {
         timeout: TRANSACTION_TIMEOUT_MS,
       });
@@ -306,6 +391,13 @@ export async function seedPrisma(
     throw new Error(`SeedSmith: Seeding failed. ${message}`);
   } finally {
     summary.durationMs = Date.now() - start;
+  }
+
+  if (dryRun) {
+    summary.generated = summary.inserted;
+    summary.inserted = Object.fromEntries(
+      Object.keys(summary.generated).map((name) => [name, 0]),
+    );
   }
 
   return summary;

@@ -49,6 +49,9 @@ export interface PrismaRelation {
 export interface PrismaModelPlan {
   name: string;
   delegate: string; // property name on the Prisma client
+  fieldNames: string[]; // every field in the model, generated or not
+  // Id and unique fields the database fills in (autoincrement, uuid, ...)
+  databaseKeys: { name: string; type: string }[];
   fields: FieldDescriptor[]; // fields SeedSmith generates values for
   relations: PrismaRelation[];
 }
@@ -173,6 +176,16 @@ export function planModels(
     return {
       name: model.name,
       delegate: model.name.charAt(0).toLowerCase() + model.name.slice(1),
+      fieldNames: model.fields.map((f) => f.name),
+      databaseKeys: model.fields
+        .filter(
+          (f) =>
+            f.kind === "scalar" &&
+            f.hasDefaultValue &&
+            (f.isId || f.isUnique) &&
+            !foreignKeys.has(f.name),
+        )
+        .map((f) => ({ name: f.name, type: f.type })),
       fields,
       relations,
     };

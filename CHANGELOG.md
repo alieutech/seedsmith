@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- Dry run: `--dry-run` on the CLI and `dryRun: true` for `seedDatabase` and `seedPrisma` generate and validate documents without writing anything, and return them in `summary.samples`. The CLI no longer needs `--uri` for a dry run.
+- `overrides` option for `seedDatabase`, `seedPrisma` and `seed.config.js`: set specific fields to a fixed value or to the result of a function that receives `faker` and `{ model, index, doc }`.
+
 ## 0.2.0
 
 ### Breaking

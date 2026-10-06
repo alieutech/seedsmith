@@ -2,10 +2,13 @@
 import mongoose from "mongoose";
 import path from "path";
 import fs from "fs";
+import util from "util";
 import { seedDatabase } from "./seed";
 import { resolveCliOptions, USAGE } from "./cliOptions";
 import { ensureNotProduction } from "./utils/envCheck";
 import { createLogger } from "./utils/logger";
+
+const DRY_RUN_SAMPLES = 3;
 
 async function main() {
   const argv = process.argv.slice(2);
@@ -39,17 +42,32 @@ async function main() {
     process.exit(1);
   }
 
-  if (!uri) {
+  // A dry run can work from the schemas alone
+  if (!uri && !options.dryRun) {
     console.error(USAGE);
     process.exit(1);
   }
 
-  await mongoose.connect(uri);
+  if (uri) await mongoose.connect(uri);
   let summary;
   try {
     summary = await seedDatabase(mongoose, options);
   } finally {
-    await mongoose.disconnect();
+    if (uri) await mongoose.disconnect();
+  }
+
+  if (summary.dryRun) {
+    for (const [name, docs] of Object.entries(summary.samples ?? {})) {
+      const shown = docs.slice(0, DRY_RUN_SAMPLES);
+      console.log(
+        `\n${name}: ${docs.length} generated, showing ${shown.length}`,
+      );
+      for (const doc of shown) {
+        console.log(util.inspect(doc, { depth: null, colors: false }));
+      }
+    }
+    console.log("\nDry run complete. Nothing was written.");
+    return;
   }
 
   console.log("Seed complete");

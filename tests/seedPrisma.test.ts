@@ -170,6 +170,104 @@ describe("seedPrisma", () => {
     expect(warnings.join(" ")).toMatch(/Stopped seeding 'User'/);
   });
 
+  it("applies overrides, and an overridden foreign key decides the relation", async () => {
+    const warnings: string[] = [];
+    const prisma = fakeClient({ user: ["email"] });
+    await seedPrisma(prisma, {
+      datamodel,
+      includeModels: ["User"],
+      docsPerModel: 3,
+      logger: silent,
+    });
+    const summary = await seedPrisma(prisma, {
+      datamodel,
+      includeModels: ["User", "Post"],
+      docsPerModel: { User: 2, Post: 4 },
+      logger: { ...silent, warn: (m: string) => void warnings.push(m) },
+      overrides: {
+        User: {
+          role: "ADMIN",
+          email: (_faker, { index }) => `admin${index}@example.com`,
+          managerId: 1,
+        },
+        Post: {
+          authorId: 2,
+          title: (faker, { index }) => `${index}: ${faker.lorem.word()}`,
+          nope: 1,
+        },
+        Ghost: { a: 1 },
+      },
+    });
+
+    expect(summary.inserted).toEqual({ User: 2, Post: 4 });
+    const added = prisma.tables.user.slice(3);
+    expect(added.map((u: any) => u.email)).toEqual([
+      "admin0@example.com",
+      "admin1@example.com",
+    ]);
+    added.forEach((u: any) => {
+      expect(u.role).toBe("ADMIN");
+      expect(u.managerId).toBe(1);
+    });
+    prisma.tables.post.forEach((p: any, i: number) => {
+      expect(p.authorId).toBe(2);
+      expect(p.title.startsWith(`${i}: `)).toBe(true);
+    });
+    expect(warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/Override 'Post\.nope' does not match a field/),
+        expect.stringMatching(/Overrides for 'Ghost' ignored/),
+      ]),
+    );
+  });
+
+  it("dry run writes nothing and shows rows with placeholder keys", async () => {
+    const prisma = fakeClient({ user: ["email"], profile: ["id", "userId"] });
+    await seedPrisma(prisma, {
+      datamodel,
+      includeModels: ["User"],
+      docsPerModel: 2,
+      logger: silent,
+    });
+
+    const summary = await seedPrisma(prisma, {
+      datamodel,
+      docsPerModel: 3,
+      dryRun: true,
+      useTransactions: true,
+      logger: silent,
+    });
+
+    expect(summary.dryRun).toBe(true);
+    expect(summary.inserted).toEqual({ User: 0, Post: 0, Profile: 0 });
+    expect(summary.generated).toEqual({ User: 3, Post: 3, Profile: 3 });
+    // the database is untouched
+    expect(prisma.tables.user).toHaveLength(2);
+    expect(prisma.tables.post).toHaveLength(0);
+    expect(prisma.log).not.toContain("transaction");
+
+    // generated keys continue after the existing rows
+    expect(summary.samples!.User.map((u) => u.id)).toEqual([3, 4, 5]);
+    summary.samples!.Post.forEach((p) => {
+      expect([1, 2, 3, 4, 5]).toContain(p.authorId);
+      expect(typeof p.id).toBe("number");
+    });
+    expect(new Set(summary.samples!.Profile.map((p) => p.userId)).size).toBe(3);
+
+    // with dropBeforeSeed, the seeded tables count as empty
+    const fresh = await seedPrisma(prisma, {
+      datamodel,
+      includeModels: ["User"],
+      docsPerModel: 2,
+      dropBeforeSeed: true,
+      dryRun: true,
+      logger: silent,
+    });
+    expect(fresh.samples!.User.map((u) => u.id)).toEqual([1, 2]);
+    expect(prisma.tables.user).toHaveLength(2);
+    expect(prisma.log).not.toContain("deleteMany:user");
+  });
+
   it("explains how to supply the datamodel when it is missing", async () => {
     await expect(seedPrisma(fakeClient({}), {})).rejects.toThrow(
       /Prisma\.dmmf\.datamodel/,

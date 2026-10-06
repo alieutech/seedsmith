@@ -1,5 +1,11 @@
 export { seedDatabase } from "./seed";
 export type { SeedOptions, SeedSummary } from "./seed";
+export type {
+  SeedOverrides,
+  FieldOverride,
+  OverrideFunction,
+  OverrideContext,
+} from "./overrides";
 
 // Adapter types for custom ORM implementations
 export { PartialInsertError } from "./adapters/types";

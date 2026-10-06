@@ -17,6 +17,8 @@ A Node.js + TypeScript CLI and library that auto-generates seed data for MongoDB
 - 🎲 Deterministic seeding via seed option
 - 🔄 Transaction support
 - 🎯 Smart field-name mapping (email, phone, price, etc.)
+- ✏️ Per-field overrides: fixed values or your own generator functions
+- 👀 Dry run: preview the generated documents without writing anything
 
 ## Install
 
@@ -66,6 +68,7 @@ seedsmith --uri mongodb://localhost:27017/mydb --models ./models --drop
 | `-e, --exclude <X,Y>` | Skip these models |
 | `--drop` | Drop collections before seeding |
 | `--transactions` | Wrap seeding in a transaction (requires a replica set) |
+| `--dry-run` | Show sample documents without writing anything |
 | `--seed <n>` | Seed for deterministic fake data |
 | `--verbose` | Detailed logging |
 | `-h, --help` | Show help |
@@ -173,6 +176,63 @@ await seedDatabase(mongoose, {
   verbose: true, // detailed logging
 });
 ```
+
+## Dry run
+
+Preview what SeedSmith would create before it touches your database:
+
+```bash
+# from the schemas alone, no database needed
+seedsmith --dry-run --models ./models --count 5
+
+# with a connection, refs to models outside the run point at their existing documents
+seedsmith --dry-run --uri "$MONGO_URI" --models ./models
+```
+
+The CLI prints three sample documents per model. Nothing is inserted and `--drop` is ignored.
+
+From code, pass `dryRun: true` to `seedDatabase` or `seedPrisma` and read the result:
+
+```ts
+const summary = await seedDatabase(mongoose, { docsPerModel: 5, dryRun: true });
+summary.generated; // { User: 5, Post: 5 }
+summary.samples.User; // the documents, as they would be stored
+summary.inserted; // { User: 0, Post: 0 }
+```
+
+- Mongoose documents are validated the way a save would validate them, so a schema the generator cannot satisfy fails in the dry run too. Unique-index collisions are not detected.
+- With Prisma, existing rows are still read so relations can point at them. Keys the database would generate (autoincrement ids, uuids) are shown as placeholders.
+
+## Overrides
+
+By default SeedSmith guesses a value from each field's type and name. Use `overrides` to decide specific fields yourself, with a fixed value or a function. It works the same in `seedDatabase`, `seedPrisma` and `seed.config.js`:
+
+```js
+// seed.config.js
+module.exports = {
+  docsPerModel: 25,
+  overrides: {
+    User: {
+      role: "admin", // fixed value
+      sku: (faker) => faker.helpers.fromRegExp("[A-Z]{3}-[0-9]{4}"),
+      position: (faker, { index }) => index + 1, // 1, 2, 3, ...
+      "address.city": "Banjul", // nested path
+      // listed last, so it can read the fields above
+      handle: (faker, { doc }) => `${doc.role}-${doc.position}`,
+    },
+    Post: {
+      status: "published",
+    },
+  },
+};
+```
+
+- Keys are model names, then field paths (field names for Prisma).
+- A function receives `faker` and `{ model, index, doc }`, where `index` counts the documents generated for that model in this run and `doc` is the document so far. It may be async.
+- Overrides are applied after the generated values, in the order you list them.
+- An override wins over schema defaults, and an overridden ref or foreign key is used as given, so nothing is looked up or created for it.
+- Returning `undefined` from a function leaves the field unset.
+- If a unique field collides, override functions are called again for that document.
 
 ## Supported schema features
 
