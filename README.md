@@ -19,71 +19,101 @@ A Node.js + TypeScript CLI and library that auto-generates seed data for MongoDB
 - 🎯 Smart field-name mapping (email, phone, price, etc.)
 - ✏️ Per-field overrides: fixed values or your own generator functions
 - 👀 Dry run: preview the generated documents without writing anything
+- ⚡ Zero-config CLI: detects Prisma or Mongoose, reads `.env`, loads TypeScript models
+- 🧪 Factories for tests: create one valid document on demand
+
+## Quick start
+
+```bash
+npm install -D @alieutech/seedsmith
+
+npx seedsmith --dry-run   # preview the data, nothing is written
+npx seedsmith             # seed the database
+```
+
+That is all a typical project needs. SeedSmith works out the rest:
+
+- **Which ORM**: a Prisma schema (`prisma/schema.prisma`) means Prisma; otherwise it looks for a Mongoose models folder in `./models`, `./src/models` and similar places.
+- **Which database**: the connection string is read from `.env.local` or `.env`. For MongoDB it looks at `MONGO_URI`, `MONGODB_URI` and `DATABASE_URL`; for Prisma it uses the variable your schema names.
+- **TypeScript models**: `.ts` model files are loaded with the `tsx` or `ts-node` already in your project. If you have neither, run `npm install -D tsx`.
+
+`npx seedsmith init` writes a starter `seed.config.js` and adds a `"seed"` script to `package.json`, so the team can run `npm run seed`.
+
+**Safety:** when SeedSmith finds the connection string by itself and it does not point at a local database, it shows the host and asks before writing anything. In scripts and CI, pass `--yes` to confirm. A connection string you pass with `--uri` is taken as intended.
 
 ## Install
 
 ```bash
-# Mongoose projects
-npm install @alieutech/seedsmith mongoose
-
-# Prisma projects (no mongoose needed)
-npm install @alieutech/seedsmith
-
-# CLI usage (MongoDB only)
-npm install -g @alieutech/seedsmith mongoose
+# in your project (Mongoose projects need mongoose, which you already have)
+npm install -D @alieutech/seedsmith
 ```
 
-Requires Node.js 20.19 or newer. `mongoose` (v8 or v9) is an optional peer dependency, so SeedSmith uses the same copy as your models.
+Requires Node.js 20.19 or newer. `mongoose` (v8 or v9) is an optional peer dependency, so SeedSmith uses the copy your models use. Prisma projects do not need it.
 
 ## CLI usage
 
 ```bash
-# Basic
+# Detect everything
+seedsmith
+
+# Be explicit
 seedsmith --uri mongodb://localhost:27017/mydb --models ./path/to/models --count 25
 
-# Quick start with your Atlas cluster (use environment variable – do NOT hardcode secrets)
-export MONGO_URI="mongodb+srv://<username>:<password>@<cluster-host>/<dbName>?retryWrites=true&w=majority&appName=SeedSmith"
-
-NODE_ENV=development \
-seedsmith \
-  --uri "$MONGO_URI" \
-  --models ./models \
-  --count 25
-
 # Include/Exclude models
-seedsmith --uri mongodb://localhost:27017/mydb --models ./models --include User,Post --exclude Log
+seedsmith --include User,Post --exclude Log
 
-# Drop collections before seeding
-seedsmith --uri mongodb://localhost:27017/mydb --models ./models --drop
+# Empty the collections or tables before seeding
+seedsmith --drop
+
+# Prisma project that also has a models folder
+seedsmith --orm prisma
 ```
 
 ### CLI options
 
 | Flag | Description |
 | --- | --- |
-| `-u, --uri <uri>` | MongoDB connection string (required) |
-| `-m, --models <dir>` | Directory of model files to load |
+| `--orm <name>` | Force `mongoose` or `prisma` instead of detecting it |
+| `-u, --uri <uri>` | Database connection string (default: from `.env`) |
+| `-m, --models <dir>` | Mongoose models folder, `.js` or `.ts`, subfolders included (default: detected) |
 | `-c, --count <n>` | Documents to create per model |
 | `-i, --include <A,B>` | Only seed these models |
 | `-e, --exclude <X,Y>` | Skip these models |
-| `--drop` | Drop collections before seeding |
-| `--transactions` | Wrap seeding in a transaction (requires a replica set) |
+| `--drop` | Empty the seeded collections or tables first |
+| `--transactions` | Wrap seeding in a transaction (MongoDB requires a replica set) |
 | `--dry-run` | Show sample documents without writing anything |
 | `--seed <n>` | Seed for deterministic fake data |
+| `--env-file <path>` | Read this file instead of `.env.local` and `.env` |
+| `-y, --yes` | Do not ask before seeding a non-local database |
 | `--verbose` | Detailed logging |
 | `-h, --help` | Show help |
 
+`seedsmith init` accepts `--orm` and `--force` (overwrite an existing config file).
+
 ### Optional config file
 
-Create `seed.config.js` in your project root to customize defaults. Flags override these values:
+`seed.config.js` in your project root sets defaults; flags override them. `seedsmith init` creates one for you. It can also be `seed.config.cjs`, `.mjs` or `.ts`.
 
 ```js
 // seed.config.js
+/** @type {import("@alieutech/seedsmith").SeedConfig} */
 module.exports = {
+  orm: "mongoose", // or "prisma"; detected when omitted
+  modelsPath: "./src/models", // Mongoose only; detected when omitted
   docsPerModel: 25,
   includeModels: ["User", "Post"],
   dropBeforeSeed: false,
   useTransactions: false,
+  // uri: process.env.SEED_DATABASE_URL, // read from .env when omitted
+};
+```
+
+For Prisma, if your client needs constructor options (a driver adapter, for example) or is generated to a custom folder, hand it to the CLI:
+
+```js
+module.exports = {
+  orm: "prisma",
+  prismaClient: () => require("./src/db").prisma,
 };
 ```
 
@@ -117,7 +147,7 @@ await seedDatabase(mongoose, { docsPerModel: 10 });
 
 ## Using with Prisma
 
-`seedPrisma` reads your models, enums and relations from Prisma itself, so no Mongoose models are needed:
+In a Prisma project the CLI needs no code: run `npx seedsmith`. To seed from your own script, for example `prisma/seed.js`, use `seedPrisma`. It reads your models, enums and relations from Prisma itself, so no Mongoose models are needed:
 
 ```ts
 import { PrismaClient, Prisma } from "@prisma/client";
@@ -176,6 +206,40 @@ await seedDatabase(mongoose, {
   verbose: true, // detailed logging
 });
 ```
+
+## Factories for tests
+
+Seeding fills a whole database. In a test you usually want one valid document, right now. A factory gives you that, using the same generator, overrides and ref handling:
+
+```ts
+import mongoose from "mongoose";
+import { createFactory } from "@alieutech/seedsmith";
+
+const factory = createFactory(mongoose);
+
+const admin = await factory.create("User", { role: "admin" }); // saved document
+const post = await factory.create("Post", { author: admin._id });
+const comments = await factory.createMany("Comment", 3, { post: post._id });
+const draft = await factory.build("Post"); // not saved
+```
+
+With Prisma:
+
+```ts
+import { PrismaClient, Prisma } from "@prisma/client";
+import { createPrismaFactory } from "@alieutech/seedsmith";
+
+const factory = createPrismaFactory(prisma, { datamodel: Prisma.dmmf.datamodel });
+
+const admin = await factory.create("User", { role: "ADMIN" });
+const post = await factory.create("Post", { authorId: admin.id });
+```
+
+- `create` saves and returns one document or row. The second argument works like [overrides](#overrides): fixed values or functions.
+- Required refs and relations are satisfied for you: an existing document is linked if there is one, otherwise one is created, and so on up the chain. Pass the ref yourself to control it.
+- `build` writes nothing. With Mongoose it returns an unsaved document and does not read the database, so a required ref holds a placeholder id. With Prisma it returns plain data and links to existing rows only.
+- `createFactory(mongoose, { overrides, seed })` sets defaults for every document of a model; per-call values win.
+- A unique collision regenerates the document, up to five times.
 
 ## Dry run
 
@@ -246,6 +310,8 @@ module.exports = {
 - SeedSmith throws if `NODE_ENV` is `production`.
 - Models must register themselves with Mongoose (e.g., `mongoose.model('User', userSchema)`).
 - CLI loads `seed.config.js` if present and merges with flags.
+- An empty `includeModels` list means "all models".
+- The CLI loads `.env.local` and then `.env`; variables that are already set in your shell win.
 
 ## Security
 

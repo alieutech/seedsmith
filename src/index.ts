@@ -7,6 +7,16 @@ export type {
   OverrideContext,
 } from "./overrides";
 
+export type { SeedConfig } from "./cliOptions";
+
+// Factories: single documents or rows on demand, for tests
+export { createFactory, type Factory, type FactoryOptions } from "./factory";
+export {
+  createPrismaFactory,
+  type PrismaFactory,
+  type PrismaFactoryOptions,
+} from "./prisma/factory";
+
 // Adapter types for custom ORM implementations
 export { PartialInsertError } from "./adapters/types";
 export type {

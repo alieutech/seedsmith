@@ -1,7 +1,5 @@
 import type mongooseType from "mongoose";
 import { faker } from "@faker-js/faker";
-import path from "path";
-import fs from "fs";
 import { ensureNotProduction } from "./utils/envCheck";
 import { defaults } from "./config/defaults";
 import {
@@ -25,15 +23,17 @@ import {
   type SeedSession,
 } from "./adapters/types";
 import { createMongooseAdapter } from "./adapters/mongooseAdapter";
+import { loadModelsFromDir } from "./project/loadModules";
 import {
   applyOverrides,
   isOverridden,
+  unknownOverrideKeys,
   validateOverrides,
   type SeedOverrides,
 } from "./overrides";
 
 export interface SeedOptions {
-  modelsPath?: string; // Directory containing model files that register with mongoose
+  modelsPath?: string; // Directory of model files (.js or .ts, subfolders included) that register with mongoose
   docsPerModel?: number | Record<string, number>;
   includeModels?: string[];
   excludeModels?: string[];
@@ -63,42 +63,15 @@ export interface SeedSummary {
 
 function normalizeList(input?: string[] | string): string[] | undefined {
   if (!input) return undefined;
-  if (Array.isArray(input)) return input;
+  // An empty list means "no filter"
+  if (Array.isArray(input)) return input.length ? input : undefined;
   return String(input)
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 }
 
-function loadModelsFromDir(modelsPath: string) {
-  const abs = path.isAbsolute(modelsPath)
-    ? modelsPath
-    : path.resolve(process.cwd(), modelsPath);
-  let files: string[] = [];
-  try {
-    files = fs.readdirSync(abs);
-  } catch (e: any) {
-    throw new Error(
-      `SeedSmith: Failed to read models directory: ${abs}. ${e?.message || e}`,
-    );
-  }
-  const loadableExt = new Set([".js", ".cjs", ".mjs"]);
-  files
-    .filter((f) => loadableExt.has(path.extname(f)))
-    .forEach((f) => {
-      const full = path.join(abs, f);
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        require(full);
-      } catch (e: any) {
-        throw new Error(
-          `SeedSmith: Failed to load model file ${full}. ${e?.message || e}`,
-        );
-      }
-    });
-}
-
-async function fetchRandomId(
+export async function fetchRandomId(
   model: mongooseType.Model<any>,
   rawSession?: mongooseType.ClientSession,
 ): Promise<mongooseType.Types.ObjectId | null> {
@@ -173,7 +146,7 @@ export async function seedDatabase(
 
   const start = Date.now();
   // Load models if a path is provided
-  if (modelsPath) loadModelsFromDir(modelsPath);
+  if (modelsPath) await loadModelsFromDir(modelsPath);
 
   // Build model map from registered models
   const names = mongoose.modelNames();
@@ -231,18 +204,11 @@ export async function seedDatabase(
       warnOnce(`Overrides for '${name}' ignored: it is not being seeded.`);
       continue;
     }
-    for (const key of Object.keys(fields)) {
-      const known = descriptor.fields.some(
-        (f) =>
-          f.path === key ||
-          f.path.startsWith(`${key}.`) ||
-          key.startsWith(`${f.path}.`),
+    const paths = descriptor.fields.map((f) => f.path);
+    for (const key of unknownOverrideKeys(paths, fields)) {
+      warnOnce(
+        `Override '${name}.${key}' does not match a field in the schema.`,
       );
-      if (!known) {
-        warnOnce(
-          `Override '${name}.${key}' does not match a field in the schema.`,
-        );
-      }
     }
   }
 

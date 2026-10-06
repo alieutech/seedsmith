@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- Zero-config CLI: `seedsmith` with no flags detects a Prisma schema or a Mongoose models folder and reads the connection string from `.env.local` or `.env`.
+- The CLI seeds Prisma projects (`--orm prisma`, or detected). A client that needs constructor options can be supplied as `prismaClient` in the config file.
+- TypeScript model files and `seed.config.ts` are loaded, using the `tsx`, `ts-node` or `esbuild-register` in the project, or Node's own type stripping.
+- `seedsmith init` writes a starter config file and adds a `"seed"` script to `package.json`.
+- Factories for tests: `createFactory(mongoose)` and `createPrismaFactory(prisma)` with `create`, `createMany` and `build`, which make single documents on demand and create the documents their required refs need.
+- New flags: `--orm`, `--env-file`, `--yes`. New config keys: `orm`, `uri`, `prismaClient`. `SeedConfig` type for config files.
+
+### Changed
+
+- When the CLI finds the connection string by itself and it is not a local database, it asks for confirmation before writing; non-interactive runs need `--yes`. A connection string passed with `--uri` is unaffected.
+- `modelsPath` now loads model files in subfolders too, and skips `*.test.*`, `*.spec.*` and `*.d.ts` files.
+- The CLI uses the `mongoose` installed in the project it runs in, so a globally installed CLI shares one copy with the project's models.
+- An empty `includeModels` list now means "all models"; it used to seed nothing.
+- CLI errors the user can fix are printed as one line, without a stack trace.
+
 ## 0.3.0
 
 ### Added

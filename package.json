@@ -1,6 +1,6 @@
 {
   "name": "@alieutech/seedsmith",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "CLI + library to auto-generate seed data for MongoDB (Mongoose) and Prisma with realistic fake data",
   "license": "MIT",
   "repository": {
@@ -75,6 +75,7 @@
     "mongodb-memory-server": "^10.1.4",
     "mongoose": "^8.5.2",
     "ts-jest": "^29.4.14",
+    "tsx": "^4.23.15",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.71.0"
   }

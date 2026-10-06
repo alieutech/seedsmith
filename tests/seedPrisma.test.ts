@@ -1,4 +1,4 @@
-import { seedPrisma, type PrismaDatamodel } from "../src";
+import { createPrismaFactory, seedPrisma, type PrismaDatamodel } from "../src";
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
 
@@ -270,6 +270,110 @@ describe("seedPrisma", () => {
 
   it("explains how to supply the datamodel when it is missing", async () => {
     await expect(seedPrisma(fakeClient({}), {})).rejects.toThrow(
+      /Prisma\.dmmf\.datamodel/,
+    );
+  });
+});
+
+describe("createPrismaFactory", () => {
+  beforeAll(() => {
+    process.env.NODE_ENV = "test";
+  });
+
+  const unique = { user: ["email"], profile: ["id", "userId"] };
+
+  it("create inserts the row and the rows its required relations need", async () => {
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, { datamodel, logger: silent });
+
+    const post = await factory.create("Post", { title: "Hello" });
+
+    expect(post.title).toBe("Hello");
+    expect(typeof post.id).toBe("number");
+    expect(prisma.tables.user).toHaveLength(1);
+    expect(post.authorId).toBe(prisma.tables.user[0].id);
+    expect(prisma.tables.post).toEqual([post]);
+  });
+
+  it("uses a foreign key passed as an override instead of creating a row", async () => {
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, { datamodel, logger: silent });
+    const admin = await factory.create("User", { role: "ADMIN" });
+
+    const post = await factory.create("Post", { authorId: admin.id });
+
+    expect(admin.role).toBe("ADMIN");
+    expect(post.authorId).toBe(admin.id);
+    expect(prisma.tables.user).toHaveLength(1);
+  });
+
+  it("build writes nothing and leaves a relation with no target unset", async () => {
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, { datamodel, logger: silent });
+
+    const orphan = await factory.build("Post");
+    expect(typeof orphan.title).toBe("string");
+    expect(orphan.authorId).toBeUndefined();
+    expect(prisma.tables.user).toHaveLength(0);
+    expect(prisma.tables.post).toHaveLength(0);
+
+    const user = await factory.create("User");
+    const linked = await factory.build("Post");
+    expect(linked.authorId).toBe(user.id);
+    expect(prisma.tables.post).toHaveLength(0);
+  });
+
+  it("does not point at rows that were deleted between calls", async () => {
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, { datamodel, logger: silent });
+    await factory.create("Post");
+    prisma.tables.user.length = 0;
+    prisma.tables.post.length = 0;
+
+    const post = await factory.create("Post");
+
+    expect(prisma.tables.user).toHaveLength(1);
+    expect(post.authorId).toBe(prisma.tables.user[0].id);
+  });
+
+  it("merges factory-level overrides with per-call ones, and counts per model", async () => {
+    const warnings: string[] = [];
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, {
+      datamodel,
+      logger: { ...silent, warn: (m: string) => void warnings.push(m) },
+      overrides: {
+        User: {
+          role: "ADMIN",
+          email: (_faker, { index }) => `user${index}@example.com`,
+        },
+      },
+    });
+
+    const users = await factory.createMany("User", 3, { role: "USER", nope: 1 });
+
+    expect(users.map((u) => u.email)).toEqual([
+      "user0@example.com",
+      "user1@example.com",
+      "user2@example.com",
+    ]);
+    users.forEach((u) => expect(u.role).toBe("USER"));
+    expect((await factory.build("User")).role).toBe("ADMIN");
+    expect(warnings.join(" ")).toMatch(/Override 'User\.nope' does not match/);
+  });
+
+  it("rejects unknown models, exhausted unique values and a missing datamodel", async () => {
+    const prisma = fakeClient(unique);
+    const factory = createPrismaFactory(prisma, { datamodel, logger: silent });
+
+    await expect(factory.create("Ghost")).rejects.toThrow(
+      /Model 'Ghost' not found in the Prisma schema/,
+    );
+    await factory.create("User", { email: "taken@example.com" });
+    await expect(
+      factory.create("User", { email: "taken@example.com" }),
+    ).rejects.toThrow(/Failed to create 'User'.*unique constraints/);
+    expect(() => createPrismaFactory(fakeClient({}), {})).toThrow(
       /Prisma\.dmmf\.datamodel/,
     );
   });

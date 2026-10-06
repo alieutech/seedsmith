@@ -47,6 +47,22 @@ export function validateOverrides(overrides: unknown): SeedOverrides | undefined
   return overrides as SeedOverrides;
 }
 
+// Override keys that match no field path (a key may name a field, its parent, or a nested path)
+export function unknownOverrideKeys(
+  fieldPaths: string[],
+  modelOverrides: Record<string, FieldOverride>,
+): string[] {
+  return Object.keys(modelOverrides).filter(
+    (key) =>
+      !fieldPaths.some(
+        (path) =>
+          path === key ||
+          path.startsWith(`${key}.`) ||
+          key.startsWith(`${path}.`),
+      ),
+  );
+}
+
 // True when the field is replaced by an override, so no value needs to be generated for it
 export function isOverridden(
   path: string,
